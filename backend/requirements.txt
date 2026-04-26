@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+duckduckgo_search
+chromadb
+requests
+langgraph
