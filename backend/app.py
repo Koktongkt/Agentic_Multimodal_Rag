@@ -3,9 +3,11 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import glob
+import re
 import json
 import requests
 import time
+from markitdown import MarkItDown
 
 # ChromaDB
 import chromadb
@@ -139,7 +141,8 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
 @app.post('/ingest')
 def ingest(force: bool = False):
-    """Ingest all .md files from docs/ into Chroma using Ollama embeddings.
+    """Ingest all documents from DOCS_DIR using markitdown to convert files to text,
+    then chunk and store embeddings in Chroma using Ollama.
     If force=True, existing collection will be cleared and rebuilt."""
     if not os.path.exists(DOCS_DIR):
         return {"status": "docs folder not found", "path": DOCS_DIR}
@@ -159,36 +162,48 @@ def ingest(force: bool = False):
     except Exception:
         pass
 
-    files = glob.glob(os.path.join(DOCS_DIR, '**', '*.md'), recursive=True)
-    total_chunks = 0
-    for fpath in files:
-        try:
-            with open(fpath, 'r', encoding='utf-8') as fh:
-                text = fh.read()
-        except Exception:
-            continue
-        chunks = chunk_text(text)
-        if not chunks:
-            continue
-        # create ids and metadatas
-        ids = [f"{os.path.basename(fpath)}_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": os.path.relpath(fpath, DOCS_DIR), "chunk_index": i} for i in range(len(chunks))]
-        # embed in batches to avoid too large requests
-        batch_size = 16
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i+batch_size]
-            try:
-                embs = ollama_embed(batch)
-            except Exception as e:
-                return {"status": "embedding_failed", "error": str(e)}
-            batch_ids = ids[i:i+batch_size]
-            batch_meta = metadatas[i:i+batch_size]
-            coll.add(documents=batch, metadatas=batch_meta, ids=batch_ids, embeddings=embs)
-            total_chunks += len(batch)
-            time.sleep(0.1)
+    # Use DocumentIngestor for robust multi-format ingestion
+    try:
+        from .document_ingestor import DocumentIngestor
+    except Exception as e:
+        return {"status": "document_ingestor_unavailable", "error": str(e)}
 
-    # persist if needed (chromadb client handles persistence)
-    return {"status": "ingested", "files": len(files), "chunks": total_chunks}
+    ingestor = DocumentIngestor(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    documents = ingestor.load_all_documents()
+    if not documents:
+        return {"status": "no_documents_found"}
+
+    chunks = ingestor.chunk_documents(documents)
+    if not chunks:
+        return {"status": "no_chunks", "documents": len(documents)}
+
+    total_chunks = 0
+    batch_size = 16
+
+    # Add chunks to Chroma in batches
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i+batch_size]
+        docs_batch = [c['content'] for c in batch_chunks]
+        ids_batch = []
+        metas_batch = []
+        for c in batch_chunks:
+            try:
+                rel_source = os.path.relpath(c.get('source', ''), DOCS_DIR)
+            except Exception:
+                rel_source = c.get('source', '')
+            ids_batch.append(f"{rel_source}_{c.get('chunk_id')}")
+            metas_batch.append({"source": rel_source, "chunk_index": c.get('chunk_id')})
+
+        try:
+            embs = ollama_embed(docs_batch)
+        except Exception as e:
+            return {"status": "embedding_failed", "error": str(e)}
+
+        coll.add(documents=docs_batch, metadatas=metas_batch, ids=ids_batch, embeddings=embs)
+        total_chunks += len(docs_batch)
+        time.sleep(0.1)
+
+    return {"status": "ingested", "files": len(documents), "chunks": total_chunks}
 
 
 @app.post('/clear')
@@ -202,36 +217,134 @@ def clear():
     return {"status": "cleared"}
 
 
-def rag_query(query, top_k=TOP_K_RESULTS):
-    # embed query
+def extract_json(text: str):
+    """Layer 2: robust JSON extraction"""
+
+    # 1. direct parse
     try:
-        q_emb = ollama_embed([query])[0]
-    except Exception as e:
-        return {"answer": f"Embedding failed: {e}", "documents": []}
-    coll = chroma_client.get_collection(name="docs")
-    try:
-        res = coll.query(query_embeddings=[q_emb], n_results=top_k, include=["documents", "metadatas", "distances"])
-        docs = res.get('documents', [[]])[0]
-        metas = res.get('metadatas', [[]])[0]
-        dists = res.get('distances', [[]])[0]
-        # prepare context for LLM
-        parts = []
-        for i, m in enumerate(metas):
-            src = m.get('source', 'unknown')
-            idx = m.get('chunk_index', i)
-            snippet = docs[i]
-            parts.append(f"Source: {src} (chunk {idx})\n{snippet}")
-        context = "\n\n".join(parts)
-        if len(context) > 3000:
-            context = context[:3000]
-        prompt = f"You are a helpful assistant. Use the following document chunks to answer the question. Cite sources by filename and chunk index.\n\nCONTEXT:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+        return json.loads(text)
+    except:
+        pass
+
+    # 2. extract JSON block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
         try:
-            llm_ans = llm_generate(prompt)
-        except Exception as e:
-            llm_ans = f"LLM generation failed: {e}\n\nFallback raw snippets:\n\n{context[:1000]}"
-        return {"answer": llm_ans, "documents": docs, "metadatas": metas, "distances": dists}
-    except Exception as e:
-        return {"answer": f"Chroma query failed: {e}", "documents": []}
+            return json.loads(match.group())
+        except:
+            pass
+
+    return None
+
+def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
+    current_query = query
+    last_context = []
+    
+    for i in range(max_iters):
+
+        # 1. Retrieve
+        q_emb = ollama_embed([current_query])[0]
+        coll = chroma_client.get_collection(name="docs")
+
+        res = coll.query(
+            query_embeddings=[q_emb],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        docs = res["documents"][0]
+        metas = res["metadatas"][0]
+        dists = res["distances"][0]
+
+        context = [
+            f"[{m.get('source')} | {m.get('chunk_index')}]\n{docs[j]}"
+            for j, m in enumerate(metas)
+        ]
+
+        last_context = context
+
+        # 2. Judge retrieval quality (LLM critic)
+        judge_prompt = f"""
+        You are a retrieval evaluation agent.
+
+        Your job:
+        1. Decide if retrieved context is sufficient to answer the question
+        2. If NOT sufficient, propose a better search query. Break down the query into more specific sub-questions if needed
+        or suggest different keywords to improve retrieval precision or coverage.
+
+        IMPORTANT RULES:
+        - If sufficient = true → improved_query MUST be ""
+        - If sufficient = false → improved_query MUST be a better search query
+        - improved_query must improve retrieval precision or coverage
+        - Do NOT repeat the same query unless necessary
+
+        Return ONLY valid JSON:
+
+        {{
+        "sufficient": true or false,
+        "reason": "short explanation",
+        "improved_query": "string or empty string"
+        }}
+
+        Question:
+        {query}
+
+        Retrieved context:
+        {context[:4]}
+        """
+
+        result = llm_generate(judge_prompt, temperature=0)
+
+        data = extract_json(result)
+
+        if data and data.get("sufficient") == True:
+            break
+
+        # Obtain improved query from LLM feedback, if provided, otherwise fallback to a simple refinement prompt
+        improved_query = (data or {}).get("improved_query")
+
+        if improved_query and improved_query != current_query:
+            current_query = improved_query
+        else:
+            # fallback refinement (important safeguard)
+            refine_prompt = f"""
+            Improve this search query for better document retrieval.
+
+            Query: {current_query}
+            Return ONLY the improved query.
+            """
+            current_query = llm_generate(refine_prompt, temperature=0).strip()
+
+    # 4. Final synthesis
+    final_prompt = f"""
+    You are a RAG assistant.
+
+    Use the context to answer the question. If there are no context, say you don't know. Be concise and clear.
+
+    Context:
+    {last_context[:8]}
+
+    Question:
+    {query}
+
+    Return JSON:
+    {{
+    "answer": "...",
+    "key_points": ["..."],
+    "sources": ["..."]
+    }}
+    """
+
+    result = llm_generate(final_prompt)
+    structured = extract_json(result) or {}
+
+    return {
+        "answer": structured.get("answer", ""),
+        "key_points": structured.get("key_points", []),
+        "sources": structured.get("sources", []),
+        "final_query": current_query,
+        "context": last_context
+    }
 
 
 # keep web search from before
@@ -301,6 +414,7 @@ GRAPH_AVAILABLE = True
 class GraphState(TypedDict, total=False):
     message: str
     route: str
+    direct_answer: str
     rag: Annotated[dict, lambda a, b:b] # overwrite
     web: Annotated[dict, lambda a, b:b] # overwrite
     response: Annotated[dict, lambda a, b:b] 
@@ -310,10 +424,49 @@ try:
     graph = StateGraph(GraphState)
 
     def manager_node(state: GraphState) -> GraphState:
-        """Decide routing based on message and record decision in state."""
-        message = state.get('message', '')
-        route = route_query_llm(message)
-        return {"route": route}
+        message = state.get("message", "")
+
+        prompt = f"""
+    You are a smart assistant router.
+
+    Decide how to handle the query:
+
+    Options:
+    1. "direct" → You can answer it yourself without external data
+    2. "rag" → Needs internal documents
+    3. "web" → Needs external/recent info
+    4. "both" → Needs both sources
+
+    Return ONLY JSON in this format:
+    {{
+    "mode": "...",
+    "answer": "only if mode=direct, otherwise empty string"
+    }}
+
+    Query: {message}
+    """
+
+        try:
+            import json
+
+            result = llm_generate(prompt, temperature=0)
+
+            data = json.loads(result)
+
+            mode = data.get("mode", "both")
+            answer = data.get("answer", "")
+
+            return {
+                "route": mode,
+                "direct_answer": answer
+            }
+
+        except Exception:
+            # fallback to old router
+            return {
+                "route": route_query_llm(message),
+                "direct_answer": ""
+            }
 
     def rag_agent_node(state: GraphState) -> GraphState:
         """Run RAG agent when route requires it, store result under 'rag'."""
@@ -321,7 +474,7 @@ try:
         if route not in ('rag', 'both'):
             return {}
         message = state.get('message', '')
-        rag_res = rag_query(message)
+        rag_res = rag_agent(message)
         return {"rag": rag_res}
 
     def web_agent_node(state: GraphState) -> GraphState:
@@ -334,56 +487,57 @@ try:
         return {"web": web_res}
 
     def aggregator_node(state: GraphState) -> GraphState:
-        route = state.get('route', 'both')
-        rag = state.get('rag')
-        web = state.get('web')
+        route = state.get("route")
+        direct = state.get("direct_answer")
 
-        # simple cases first (no LLM needed)
-        if route == 'rag' and rag:
-            return {"response": rag}
-        if route == 'web' and web:
-            return {"response": web}
+        # ✅ FAST PATH: no agents needed
+        if route == "direct" and direct:
+            return {
+                "response": {
+                    "route": "direct",
+                    "answer": direct
+                }
+            }
 
-        # both → use LLM to decide + synthesize
+        rag = state.get("rag")
+        web = state.get("web")
+
+        # FINAL AGGREGATION PROMPT, if rag/web no results, their portion will be none/empty, LLM should learn to handle that gracefully
         prompt = f"""
-    You are an expert assistant combining multiple information sources.
+        You are a final response formatter.
 
-    User query:
-    {state.get('message')}
+        Rules:
+        - Be concise and clear
+        - Do NOT repeat full documents
+        - Do NOT use bullet lists unless necessary
+        - If both RAG and Web info are present, compare them first for any conflicting information and synthesize them into a single answer.
 
-    RAG result:
-    {rag.get('answer') if rag else "None"}
+        User Query:
+        {state.get('message')}
 
-    Web result:
-    {web.get('answer') if web else "None"}
+        RAG Answer:
+        {rag.get('answer') if rag else "None"}
+        {rag.get('key_points') if rag else "None"}
+        {rag.get('sources') if rag else "None"}
 
-    Instructions:
-    - Decide which source is more reliable
-    - If both are useful, combine them
-    - Prefer accurate and grounded answers
-    - Keep answer concise
+        Web Answer:
+        {web.get('answer') if web else "None"}
 
-    Final Answer:
-    """
+        Final concise answer:
+        """
+
         try:
-            final_answer = llm_generate(prompt)
+            final = llm_generate(prompt)
             return {
                 "response": {
                     "route": route,
-                    "answer": final_answer,
-                    "sources": {
-                        "rag_used": rag is not None,
-                        "web_used": web is not None
-                    }
+                    "answer": final
                 }
             }
         except Exception as e:
             return {
                 "response": {
-                    "route": route,
-                    "answer": f"Aggregation failed: {e}",
-                    "rag": rag,
-                    "web": web
+                    "answer": f"Aggregation failed: {e}"
                 }
             }
 
@@ -422,10 +576,10 @@ def chat(req: ChatRequest):
         ws = web_search(message)
         response.update(ws)
     elif route == 'rag':
-        rag = rag_query(message)
+        rag = rag_agent(message)
         response.update(rag)
     else:
-        rag = rag_query(message)
+        rag = rag_agent(message)
         low_confidence = False
         if isinstance(rag.get('distances'), list) and len(rag.get('distances'))>0:
             low_confidence = all(d > 0.5 for d in rag.get('distances'))
