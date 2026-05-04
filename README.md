@@ -111,10 +111,18 @@ Fallback:
 
 ## Frontend UI
 
-### Use react chat ui to build the interface
+ Use React Chat as Frontend UI to build the interface
+ @CHAT via SEND button for user to send a query
+ @INGEST via Ingest docs button for user to ingest documents from the local database
+ @CLEAR via clear database button for user to clear the vector database (chromadb)
+ @CLEAR and FORCE=TRUE via Force Clear and rebuilt button to rebuilt database entirely
 
 ## Communication protocol
-
-### Uses FastApi to communicate between backend and frontend
+ 
+Uses FastApi to communicate between backend and frontend
+/chat to send query
+/ingest to ingest new docs in database
+/ingest and Force=True to rebult database entirely
+/vision to read image and output response in json format
 
 ---
