@@ -97,6 +97,7 @@ Fallback:
 
 ### RAG Agent
 
+
 ```json
 {
   "input": "query string",
@@ -105,7 +106,7 @@ Fallback:
     "scores": [0.92, 0.87]
   }
 }
-
+```
 ---
 
 ## Frontend UI
@@ -116,3 +117,4 @@ Fallback:
 
 ### Uses FastApi to communicate between backend and frontend
 
+---
