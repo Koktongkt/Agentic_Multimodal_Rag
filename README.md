@@ -125,4 +125,9 @@ Uses FastApi to communicate between backend and frontend
 /ingest and Force=True to rebult database entirely
 /vision to read image and output response in json format
 
+
+### Future updates
+- Graph RAG option for user
+- Upload button in chat UI for user to upload and update vector database
+- Production grade hash file metadata incorporate to filter for new documents for selected embedding ingestion into RAG database
 ---
