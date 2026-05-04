@@ -2,12 +2,15 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
-import glob
 import re
 import json
 import requests
 import time
-from markitdown import MarkItDown
+
+from typing import List, Dict
+from websockets import route
+from .document_ingestor import DocumentIngestor
+from .web_search import web_search_agent
 
 # ChromaDB
 import chromadb
@@ -15,11 +18,13 @@ from langgraph.graph import START, StateGraph
 from typing import TypedDict, Annotated
 from operator import or_
 
+# vision endpoint
+from .vision import call_ollama_vision, router as vision_router
+
 # Import configuration
 from .config import (
     DOCS_DIR, CHROMA_DB_PATH, OLLAMA_BASE_URL, EMBEDDING_MODEL, LLM_MODEL,
-    CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RESULTS, LLM_TEMPERATURE, LLM_MAX_TOKENS,
-    WEB_SEARCH_MAX_RESULTS
+    CHUNK_SIZE, CHUNK_OVERLAP, WEB_SEARCH_MAX_RESULTS, TOP_K_RESULTS, LLM_TEMPERATURE, LLM_MAX_TOKENS
 )
 
 app = FastAPI(title="Agentic RAG Backend (Chroma + Ollama + LangGraph)")
@@ -30,20 +35,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(vision_router, prefix="/api")
 
 # Initialize Chroma client (using default Client for in-memory or auto-managed persistence)
 chroma_client = chromadb.Client()
 collection = chroma_client.get_or_create_collection(name="docs")
 
 # Web search availability
-try:
-    from duckduckgo_search import ddg
-    DDG_AVAILABLE = True
-except Exception:
-    DDG_AVAILABLE = False
+from ddgs import DDGS
+
 
 class ChatRequest(BaseModel):
     message: str
+    image_b64: str | None = None
+    history: list[dict] | None = None
 
 
 def ollama_embed(texts):
@@ -163,11 +168,6 @@ def ingest(force: bool = False):
         pass
 
     # Use DocumentIngestor for robust multi-format ingestion
-    try:
-        from .document_ingestor import DocumentIngestor
-    except Exception as e:
-        return {"status": "document_ingestor_unavailable", "error": str(e)}
-
     ingestor = DocumentIngestor(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     documents = ingestor.load_all_documents()
     if not documents:
@@ -198,6 +198,14 @@ def ingest(force: bool = False):
             embs = ollama_embed(docs_batch)
         except Exception as e:
             return {"status": "embedding_failed", "error": str(e)}
+        
+        # Hard validation for embedding dimensions
+        if not embs or len(embs) == 0:
+            print("Skipping empty embedding batch")
+            continue
+        if len(embs) != len(docs_batch):
+            print(f"Embedding mismatch: {len(embs)} vs {len(docs_batch)}")
+            continue
 
         coll.add(documents=docs_batch, metadatas=metas_batch, ids=ids_batch, embeddings=embs)
         total_chunks += len(docs_batch)
@@ -236,10 +244,31 @@ def extract_json(text: str):
 
     return None
 
-def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
-    current_query = query
-    last_context = []
+def rag_agent(query, history=None, max_iters=3, top_k=TOP_K_RESULTS):
     
+    last_context = []
+    if history:
+        history_text = "\n".join(
+            [f"{h['role']}: {h['content']}" for h in history[-3:]]  # last 3 turns
+        )
+        rewrite_prompt = f"""
+        Rewrite the query to be fully self-contained using the conversation history for context. If the query is already self-contained, return it as is without any changes. 
+        If the query does not contain clear intent or subjects/objects, rewrite it to be more specific and clear. Use the conversation history for context.
+        
+        Conversation history:
+        {history_text}
+
+        Query:
+        {query}
+
+        Return ONLY the query. Do not add explanation or extra text.
+        Preserve wording unless clarification is needed for context resolution.
+        """
+
+        current_query = llm_generate(rewrite_prompt, temperature=0).strip()
+    else:
+        current_query = query
+
     for i in range(max_iters):
 
         # 1. Retrieve
@@ -254,7 +283,7 @@ def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
 
         docs = res["documents"][0]
         metas = res["metadatas"][0]
-        dists = res["distances"][0]
+        #dists = res["distances"][0]
 
         context = [
             f"[{m.get('source')} | {m.get('chunk_index')}]\n{docs[j]}"
@@ -273,21 +302,21 @@ def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
         or suggest different keywords to improve retrieval precision or coverage.
 
         IMPORTANT RULES:
-        - If sufficient = true → improved_query MUST be ""
-        - If sufficient = false → improved_query MUST be a better search query
+        - If sufficient = True → improved_query MUST be ""
+        - If sufficient = False → improved_query MUST be a better search query
         - improved_query must improve retrieval precision or coverage
         - Do NOT repeat the same query unless necessary
 
         Return ONLY valid JSON:
 
         {{
-        "sufficient": true or false,
+        "sufficient": True or False,
         "reason": "short explanation",
         "improved_query": "string or empty string"
         }}
 
         Question:
-        {query}
+        {current_query}
 
         Retrieved context:
         {context[:4]}
@@ -320,12 +349,17 @@ def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
     You are a RAG assistant.
 
     Use the context to answer the question. If there are no context, say you don't know. Be concise and clear.
+    
+    Refer to the conversation history for additional context, but do not rely on it too much as it may be incomplete. Focus on the retrieved documents as primary context.
+
+    Conversation history:
+    {history_text}
 
     Context:
     {last_context[:8]}
 
     Question:
-    {query}
+    {current_query}
 
     Return JSON:
     {{
@@ -347,33 +381,10 @@ def rag_agent(query, max_iters=3, top_k=TOP_K_RESULTS):
     }
 
 
-# keep web search from before
-def web_search(query, max_results=WEB_SEARCH_MAX_RESULTS):
-    if not DDG_AVAILABLE:
-        return {"answer": "Web search unavailable: install duckduckgo_search package.", "results": []}
-    try:
-        results = ddg(query, max_results=max_results)
-        summary = []
-        for r in results:
-            title = r.get('title') or r.get('body') or ''
-            snippet = r.get('body') or ''
-            href = r.get('href') or r.get('url') or ''
-            summary.append({'title': title, 'snippet': snippet, 'href': href})
-        agg = "\n\n".join([f"{i+1}. {s['title']} - {s['href']}\n{s['snippet']}" for i, s in enumerate(summary)])
-        # ask LLM to summarize search results
-        prompt = f"Summarize the following search results concisely and list key findings:\n\n{agg}\n\nQuestion: {query}\n\nSummary:"
-        try:
-            summary_text = llm_generate(prompt)
-        except Exception as e:
-            summary_text = f"LLM summarization failed: {e}\n\nRaw results:\n{agg}"
-        return {"answer": summary_text, "results": summary}
-    except Exception as e:
-        return {"answer": f"Web search failed: {e}", "results": []}
-
-
+# hardcoded heuristic routing as fallback when LangGraph is not available or fails
 def route_query(message: str):
     m = message.lower()
-    keywords_web = ['recent', 'today', 'news', 'search', 'google', 'duckduckgo', 'latest']
+    keywords_web = ['recent', 'news', 'search', 'google', 'web', 'current', 'latest', 'trending']
     use_web = any(k in m for k in keywords_web)
     keywords_rag = ['document', 'file', 'docs', 'local', 'definition', 'explain', 'what is', 'who is']
     use_rag = any(k in m for k in keywords_rag)
@@ -383,41 +394,20 @@ def route_query(message: str):
         return 'rag'
     return 'both'
 
-def route_query_llm(message: str) -> str:
-    prompt = f"""
-You are a routing agent.
-
-Decide how to answer the user's query:
-- "rag" → if the query should be answered using local documents
-- "web" → if the query needs recent or external information
-- "both" → if both sources may help
-
-Return ONLY one word: rag, web, or both.
-
-Query: {message}
-Answer:
-"""
-    try:
-        route = llm_generate(prompt, temperature=0).strip().lower()
-        if route in ("rag", "web", "both"):
-            return route
-    except:
-        pass
-
-    # fallback
-    return route_query(message)
-
 
 # Build a LangGraph manager graph to orchestrate RAG and Web Search with separate agents
 GRAPH_AVAILABLE = True
 
-class GraphState(TypedDict, total=False):
+class GraphState(TypedDict):
     message: str
-    route: str
+    image_b64: str | None 
+    history: List[Dict[str, str]]  # optional conversation history for context
+    route: dict
     direct_answer: str
-    rag: Annotated[dict, lambda a, b:b] # overwrite
-    web: Annotated[dict, lambda a, b:b] # overwrite
-    response: Annotated[dict, lambda a, b:b] 
+    rag: dict
+    web: dict
+    vision: dict
+    response: dict
 
 
 try:
@@ -425,73 +415,169 @@ try:
 
     def manager_node(state: GraphState) -> GraphState:
         message = state.get("message", "")
+        image = state.get("image_b64")
+        history = state.get("history", [])
+
+        history_text = "\n".join(
+            [f"{h['role']}: {h['content']}" for h in history[-10:]]  # last 10 turns
+        )
 
         prompt = f"""
-    You are a smart assistant router.
+        You are a routing system.
 
-    Decide how to handle the query:
+        Conversation history:
+        {history_text}
 
-    Options:
-    1. "direct" → You can answer it yourself without external data
-    2. "rag" → Needs internal documents
-    3. "web" → Needs external/recent info
-    4. "both" → Needs both sources
+        Image present: {"yes" if image else "no"}
 
-    Return ONLY JSON in this format:
-    {{
-    "mode": "...",
-    "answer": "only if mode=direct, otherwise empty string"
-    }}
+        You must decide ALL applicable routes. Multiple routes CAN be true at the same time.
+        Take note of the Conversation history as it may provide important context for routing decisions.
 
-    Query: {message}
-    """
+        Return ONLY valid JSON in this format:
 
-        try:
-            import json
+        {{
+        "vision": true or false,
+        "rag": true or false,
+        "web": true or false,
+        "direct": true or false,
+        "direct_answer": "ONLY if direct=true, return the answer to the question, otherwise empty string"
+        }}
 
-            result = llm_generate(prompt, temperature=0)
+        Rules:
+        - vision = true if image is present or question about image
+        - rag = true if question requires documents or definitions on topic of covid19
+        - web = true if question requires recent / external information, or if it is a general knowledge question that can be answered better with web search
+        - direct = true if general knowledge question that is considered simple and no image present.
 
-            data = json.loads(result)
+        Query:
+        {message}
+        """
 
-            mode = data.get("mode", "both")
-            answer = data.get("answer", "")
+        result = llm_generate(prompt, temperature=0)
+        data = extract_json(result) or {}
 
-            return {
-                "route": mode,
-                "direct_answer": answer
+        route = {
+            "vision": data.get("vision", False),
+            "rag": data.get("rag", False),
+            "web": data.get("web", False),
+            "direct": data.get("direct", False),
+        }
+        print(f"Routing decision: {route}")
+        direct_answer = data.get("direct_answer", "")
+
+        # fallback safety
+        if not any(route.values()):
+            route = {
+                "vision": image is not None,
+                "rag": False,
+                "web": False,
+                "direct": True
             }
 
-        except Exception:
-            # fallback to old router
-            return {
-                "route": route_query_llm(message),
-                "direct_answer": ""
-            }
+        return {
+            "route": route,
+            "direct_answer": direct_answer
+        }
 
     def rag_agent_node(state: GraphState) -> GraphState:
         """Run RAG agent when route requires it, store result under 'rag'."""
-        route = state.get('route', 'both')
-        if route not in ('rag', 'both'):
+        route = state["route"]
+        if not route.get("rag"):
             return {}
         message = state.get('message', '')
-        rag_res = rag_agent(message)
-        return {"rag": rag_res}
+        history = state.get('history', [])
+
+        rag_response = rag_agent(message, history=history)
+        return {"rag": rag_response}
 
     def web_agent_node(state: GraphState) -> GraphState:
         """Run Web Search agent when route requires it, store result under 'web'."""
-        route = state.get('route', 'both')
-        if route not in ('web', 'both'):
+        route = state["route"]
+        if not route.get("web"):
             return {}
         message = state.get('message', '')
-        web_res = web_search(message)
-        return {"web": web_res}
+        history = state.get('history', [])
+        
+        web_response = web_search_agent(
+            query=message, 
+            history=history,
+            llm_generate=llm_generate,
+            k=WEB_SEARCH_MAX_RESULTS,
+            extract_json=extract_json
+        )
+        return {"web": web_response}
+
+    def vision_agent_node(state: GraphState) -> GraphState:
+        route = state.get("route", {})
+
+        if not route.get("vision"):
+            return {}
+
+        message = state.get("message", "")
+        history = state.get("history", [])
+        image_b64 = state.get("image_b64")
+
+        history_text = ""
+        if history:
+            history_text = "\n".join(
+                [f"{h['role']}: {h['content']}" for h in history[-3:]]
+            )
+
+        if not image_b64:
+            return {"vision": {"error": "No image provided"}}
+
+        prompt = message if message else "Describe this image in detail."
+        system_prompt = """
+        You are a vision AI.
+
+        Use the conversation history for additional context if required and if user's request is ambiguous, but do not rely on it too much as it may be incomplete. Focus on analyzing the image.
+
+        Return ONLY JSON:
+        {
+        "summary": "",
+        "objects": [],
+        "scene": "",
+        "text_in_image": "",
+        "user_question_answer": "",
+        "safety_notes": ""
+        }
+        """
+        final_prompt = f"""
+        {system_prompt}
+
+        User request:
+        {prompt}
+        """
+
+        result = call_ollama_vision(
+            prompt=final_prompt,
+            image_b64=image_b64,
+            model=LLM_MODEL
+        )
+        raw = result["message"]["content"]
+        data = extract_json(raw)
+
+        if not data:
+            data = {
+                "summary": raw,
+                "objects": [],
+                "scene": "",
+                "text_in_image": "",
+                "user_question_answer": "",
+                "safety_notes": ""
+            }
+
+        return {
+            "vision": data
+        }
 
     def aggregator_node(state: GraphState) -> GraphState:
         route = state.get("route")
         direct = state.get("direct_answer")
+        history = state.get("history", [])
 
         # ✅ FAST PATH: no agents needed
-        if route == "direct" and direct:
+        if route.get("direct") and direct:
             return {
                 "response": {
                     "route": "direct",
@@ -501,6 +587,7 @@ try:
 
         rag = state.get("rag")
         web = state.get("web")
+        vision = state.get("vision")
 
         # FINAL AGGREGATION PROMPT, if rag/web no results, their portion will be none/empty, LLM should learn to handle that gracefully
         prompt = f"""
@@ -511,6 +598,8 @@ try:
         - Do NOT repeat full documents
         - Do NOT use bullet lists unless necessary
         - If both RAG and Web info are present, compare them first for any conflicting information and synthesize them into a single answer.
+        - If Vision info is present, include it in the final answer.
+        - Remove any special characters or formatting from the sources.
 
         User Query:
         {state.get('message')}
@@ -522,6 +611,15 @@ try:
 
         Web Answer:
         {web.get('answer') if web else "None"}
+        {web.get('key_points') if web else "None"}
+        {web.get('sources') if web else "None"}
+
+        Vision Answer:
+        {vision.get('summary') if vision else "None"}
+        {vision.get('objects') if vision else "None"}
+        {vision.get('scene') if vision else "None"}
+        {vision.get('text_in_image') if vision else "None"}
+        {vision.get('user_question_answer') if vision else "None"}
 
         Final concise answer:
         """
@@ -531,7 +629,8 @@ try:
             return {
                 "response": {
                     "route": route,
-                    "answer": final
+                    "answer": final,
+                    "history": history
                 }
             }
         except Exception as e:
@@ -543,13 +642,16 @@ try:
 
     # add nodes and edges: manager -> rag_agent & web_agent -> aggregator
     graph.add_node('manager', manager_node)
+    graph.add_node("vision_agent", vision_agent_node)
     graph.add_node('rag_agent', rag_agent_node)
     graph.add_node('web_agent', web_agent_node)
     graph.add_node('aggregator', aggregator_node)
 
     graph.add_edge(START, 'manager')
+    graph.add_edge("manager", "vision_agent")
     graph.add_edge('manager', 'rag_agent')
     graph.add_edge('manager', 'web_agent')
+    graph.add_edge("vision_agent", "aggregator")
     graph.add_edge('rag_agent', 'aggregator')
     graph.add_edge('web_agent', 'aggregator')
 
@@ -561,34 +663,30 @@ except Exception as e:
 
 @app.post('/chat')
 def chat(req: ChatRequest):
-    message = req.message
+
     if compiled_graph is not None:
         try:
-            out = compiled_graph.invoke({'message': message})
-            # compiled graph places final output under 'response'
-            return out.get('response', {"status": "no_response"})
+            out = compiled_graph.invoke({
+                "message": req.message,
+                "image_b64": req.image_b64,
+                "history": req.history or []
+            })
+
+            return out.get("response", {
+                "status": "no_response"
+            })
+
         except Exception as e:
             print(f"LangGraph invocation failed: {e}")
-    # fallback: run previous routing logic
-    route = route_query(message)
-    response = {"route": route}
-    if route == 'web':
-        ws = web_search(message)
-        response.update(ws)
-    elif route == 'rag':
-        rag = rag_agent(message)
-        response.update(rag)
-    else:
-        rag = rag_agent(message)
-        low_confidence = False
-        if isinstance(rag.get('distances'), list) and len(rag.get('distances'))>0:
-            low_confidence = all(d > 0.5 for d in rag.get('distances'))
-        if low_confidence:
-            ws = web_search(message)
-            response.update({'rag': rag, 'web': ws})
-        else:
-            response.update({'rag': rag})
-    return response
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    return {
+        "status": "error",
+        "error": "LangGraph not initialized"
+    }
 
 
 @app.get('/')
@@ -597,6 +695,5 @@ def root():
         "status": "ok",
         "ollama_base_url": OLLAMA_BASE_URL,
         "embedding_model": EMBEDDING_MODEL,
-        "llm_model": LLM_MODEL,
-        "web_search_available": DDG_AVAILABLE
+        "llm_model": LLM_MODEL
     }

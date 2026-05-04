@@ -32,7 +32,7 @@ API_PORT = int(os.getenv("API_PORT", 8000))
 API_DEBUG = os.getenv("API_DEBUG", "False").lower() == "true"
 
 # Web Search Configuration
-WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", 3))
+WEB_SEARCH_MAX_RESULTS = 5 # adjust as needed, keeping it low for faster responses and less noise
 
 # LLM Generation Configuration
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", 0.2))

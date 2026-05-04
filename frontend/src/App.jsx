@@ -1,4 +1,4 @@
-import React, {useState} from 'react'
+import React, { useState, useRef } from 'react'
 
 export default function App(){
   const [messages, setMessages] = useState([])
@@ -7,26 +7,71 @@ export default function App(){
   const [statusMsg, setStatusMsg] = useState('')
   const [ingesting, setIngesting] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const [image, setImage] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const fileRef = useRef(null)
+  const [history, setHistory] = useState([])
+
+  const toBase64 = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.readAsDataURL(file)
+    reader.onload = () => resolve(reader.result.split(',')[1])
+    reader.onerror = reject
+  })
 
   const send = async () => {
-    if(!input.trim()) return
-    const userMsg = {from:'user', text: input}
-    setMessages(m => [...m, userMsg])
-    const payload = {message: input}
-    setInput('')
+    if (!input.trim() && !image) return
+
+    const userContent = input || '[Image]'
+
+    const newHistory = [
+      ...history,
+      { role: 'user', content: userContent }
+    ]
+
+    setMessages(m => [...m, { from: 'user', text: userContent }])
     setLoading(true)
-    try{
+
+    try {
+      let base64 = null
+
+      if (image) {
+        base64 = await toBase64(image)
+        setImage(null)
+        setPreview(null)
+      }
+
       const res = await fetch('http://localhost:8000/chat', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: input,
+          image_b64: base64,
+          history: newHistory
+        })
       })
+
       const data = await res.json()
-      const botText = data.answer || (data.rag && data.rag.answer) || (data.web && data.web.answer) || 'No answer.'
-      setMessages(m => [...m, {from:'bot', text: botText}])
-    }catch(e){
-      setMessages(m => [...m, {from:'bot', text: 'Error communicating with backend: '+String(e)}])
-    }finally{ setLoading(false) }
+
+      const botText =
+        data.response?.answer ||
+        data.answer ||
+        data.rag?.answer ||
+        'No answer.'
+
+      const updatedHistory = [
+        ...newHistory,
+        { role: 'assistant', content: botText }
+      ]
+
+      setHistory(updatedHistory)
+      setMessages(m => [...m, { from: 'bot', text: botText }])
+
+    } finally {
+      setLoading(false)
+      setInput('')
+    }
   }
 
   const onKey = (e) => { if(e.key === 'Enter') send() }
@@ -84,8 +129,46 @@ export default function App(){
       <div className="status">{statusMsg}</div>
 
       <div className="chat-input">
-        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} placeholder="Ask anything..." />
-        <button onClick={send} disabled={loading}>{loading ? '...' : 'Send'}</button>
+
+        {/* 📷 Vision Upload Section */}
+        <div className="image-upload">
+          <button onClick={() => fileRef.current.click()}>
+            📷 Upload Image
+          </button>
+
+          {preview && (
+            <img src={preview} className="image-preview" />
+          )}
+        </div>
+
+        {/* hidden file input */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files[0]
+            if (!file) return
+
+            setImage(file)
+            setPreview(URL.createObjectURL(file))
+            e.target.value = null
+          }}
+        />
+
+        {/* 💬 text input */}
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={onKey}
+          placeholder="Ask anything..."
+        />
+
+        {/* 🚀 send button */}
+        <button onClick={send} disabled={loading}>
+          {loading ? '...' : 'Send'}
+        </button>
       </div>
     </div>
   )

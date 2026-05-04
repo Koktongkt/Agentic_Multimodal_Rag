@@ -1,3 +1,0 @@
-Web Search Integration
-
-This document explains how the Web Search agent integrates DuckDuckGo or Google search results, summarizes them, and returns structured output to the manager.

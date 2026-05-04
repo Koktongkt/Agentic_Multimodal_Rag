@@ -6,7 +6,7 @@ This project implements an **agentic Retrieval-Augmented Generation (RAG)** syst
 
 ## 🏗️ System Architecture
 
-The system consists of three core agents:
+The system consists of five core agents:
 
 ### 1. Manager Agent (Orchestrator)
 
@@ -20,10 +20,10 @@ Responsible for:
   - Knowledge-based → RAG
   - Real-time / external → Web Search
   - Complex → Both
+  - Vision
 - Manage user actions:
   - Document upload
   - Database reset
-- Aggregate and reconcile responses
 
 ---
 
@@ -42,6 +42,7 @@ Handles:
 
 #### Document ingestion:
 - Split → Embed → Store in ChromaDB
+- Utilizes MarkitDown to ingest documents and convert them into markdowns
 
 ---
 
@@ -52,10 +53,23 @@ Handles:
 - Query decomposition
 - Summarization
 
+### 4. Vision Agent
+
+Handles:
+- image upload queries
+
+### 5. Aggregrator Agent
+
+Handles:
+- Final responses from all agents
+- Compares their responses and check for consistences and accuracies
+- Summarizes all the agent's responses into a final response to output
+
+
 #### Workflow:
 1. Receive query
 2. Decompose into sub-queries (if complex)
-3. Perform web search (DuckDuckGo / Google)
+3. Perform web search (DuckDuckGo / Google) / Reads the image
 4. Retrieve content
 5. Summarize into structured output
 
@@ -69,7 +83,9 @@ The Manager Agent determines which agents to invoke:
 |-----------|--------|
 | Local knowledge | RAG only |
 | Real-time info | Web Search only |
-| Complex / uncertain | Both |
+| Image Understanding | Vision only |
+| Complex / uncertain | More than one agent |
+| Simple query | Direct|
 
 Fallback:
 - If RAG returns low relevance → trigger Web Search
@@ -95,4 +111,8 @@ Fallback:
 ## Frontend UI
 
 ### Use react chat ui to build the interface
+
+## Communication protocol
+
+### Uses FastApi to communicate between backend and frontend
 
