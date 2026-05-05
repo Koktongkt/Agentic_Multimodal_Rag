@@ -1,3 +1,4 @@
+import chunk
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +7,7 @@ import re
 import json
 import requests
 import time
+import hashlib # file hashing for better rag
 
 from typing import List, Dict
 from websockets import route
@@ -27,6 +29,9 @@ from .config import (
     CHUNK_SIZE, CHUNK_OVERLAP, WEB_SEARCH_MAX_RESULTS, TOP_K_RESULTS, LLM_TEMPERATURE, LLM_MAX_TOKENS
 )
 
+# Import chromadb collection
+from .db import collection as coll
+
 app = FastAPI(title="Agentic RAG Backend (Chroma + Ollama + LangGraph)")
 app.add_middleware(
     CORSMiddleware,
@@ -37,9 +42,6 @@ app.add_middleware(
 )
 app.include_router(vision_router, prefix="/api")
 
-# Initialize Chroma client (using default Client for in-memory or auto-managed persistence)
-chroma_client = chromadb.Client()
-collection = chroma_client.get_or_create_collection(name="docs")
 
 # Web search availability
 from ddgs import DDGS
@@ -143,82 +145,135 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         start = end - overlap
     return chunks
 
+def file_hash(filepath):
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def chunk_hash(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 
 @app.post('/ingest')
 def ingest(force: bool = False):
-    """Ingest all documents from DOCS_DIR using markitdown to convert files to text,
-    then chunk and store embeddings in Chroma using Ollama.
-    If force=True, existing collection will be cleared and rebuilt."""
     if not os.path.exists(DOCS_DIR):
-        return {"status": "docs folder not found", "path": DOCS_DIR}
+        return {"status": "docs folder not found"}
 
     if force:
         try:
-            chroma_client.delete_collection(name="docs")
+            coll.delete_collection(name="docs")
         except Exception:
             pass
-    # recreate collection
-    coll = chroma_client.get_or_create_collection(name="docs")
 
-    # If collection already has items and not force, skip
+    # --- Load existing file hashes ---
+    existing_files = {}
     try:
-        if coll.count() > 0 and not force:
-            return {"status": "collection already populated", "count": coll.count()}
+        results = coll.get(include=["metadatas"])
+        for m in results.get("metadatas", []):
+            if m and m.get("source") and m.get("file_hash"):
+                existing_files[m["source"]] = m["file_hash"]
     except Exception:
         pass
 
-    # Use DocumentIngestor for robust multi-format ingestion
+    # --- Load documents ---
     ingestor = DocumentIngestor(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     documents = ingestor.load_all_documents()
-    if not documents:
-        return {"status": "no_documents_found"}
 
-    chunks = ingestor.chunk_documents(documents)
-    if not chunks:
-        return {"status": "no_chunks", "documents": len(documents)}
+    normalized_docs = []
+    for d in documents:
+        source_path = d.get("path")
 
-    total_chunks = 0
+        if not source_path:
+            #print("Skipping doc with no source:", d)
+            continue
+
+        d["source"] = source_path  # enforce consistency
+        normalized_docs.append(d)
+
+    documents = normalized_docs
+    print("Loaded docs:", len(documents))
+
+    filtered_docs = []
+    for d in documents:
+        source = os.path.relpath(d["source"], DOCS_DIR)
+        f_hash = file_hash(d["source"])
+
+        # Skip unchanged
+        if existing_files.get(source) == f_hash:
+            continue
+
+        # Delete old chunks if updated, source exists but hash key is different in existing_files
+        if source in existing_files:
+            coll.delete(where={"source": source})
+
+        d["file_hash"] = f_hash
+        filtered_docs.append(d)
+
+    if not filtered_docs:
+        return {"status": "no_new_or_updated_documents"}
+
+    # --- Chunking ---
+    chunks = ingestor.chunk_documents(filtered_docs)
+
+    # Attach file_hash to chunks
+    doc_hash_map = {
+        os.path.relpath(d["source"], DOCS_DIR): d["file_hash"]
+        for d in filtered_docs
+    }
+
+    for c in chunks:
+        rel_source = os.path.relpath(c.get("source", ""), DOCS_DIR)
+        c["file_hash"] = doc_hash_map.get(rel_source)
+
+    # --- Insert into Chroma ---
     batch_size = 16
+    total_chunks = 0
 
-    # Add chunks to Chroma in batches
     for i in range(0, len(chunks), batch_size):
-        batch_chunks = chunks[i:i+batch_size]
-        docs_batch = [c['content'] for c in batch_chunks]
-        ids_batch = []
-        metas_batch = []
-        for c in batch_chunks:
-            try:
-                rel_source = os.path.relpath(c.get('source', ''), DOCS_DIR)
-            except Exception:
-                rel_source = c.get('source', '')
-            ids_batch.append(f"{rel_source}_{c.get('chunk_id')}")
-            metas_batch.append({"source": rel_source, "chunk_index": c.get('chunk_id')})
+        batch = chunks[i:i+batch_size]
 
-        try:
-            embs = ollama_embed(docs_batch)
-        except Exception as e:
-            return {"status": "embedding_failed", "error": str(e)}
-        
-        # Hard validation for embedding dimensions
-        if not embs or len(embs) == 0:
-            print("Skipping empty embedding batch")
-            continue
-        if len(embs) != len(docs_batch):
-            print(f"Embedding mismatch: {len(embs)} vs {len(docs_batch)}")
+        docs_batch = [c["content"] for c in batch]
+        ids_batch = [
+            f"{os.path.relpath(c['source'], DOCS_DIR)}_{chunk_hash(c['content'])}"
+            for c in batch
+        ]
+        metas_batch = [
+            {
+                "source": os.path.relpath(c["source"], DOCS_DIR),
+                "chunk_index": c.get("chunk_id"),
+                "file_hash": c.get("file_hash"),
+            }
+            for c in batch
+        ]
+
+        embs = ollama_embed(docs_batch)
+        if not embs or len(embs) != len(docs_batch):
             continue
 
-        coll.add(documents=docs_batch, metadatas=metas_batch, ids=ids_batch, embeddings=embs)
+        coll.add(
+            documents=docs_batch,
+            metadatas=metas_batch,
+            ids=ids_batch,
+            embeddings=embs
+        )
+
         total_chunks += len(docs_batch)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
-    return {"status": "ingested", "files": len(documents), "chunks": total_chunks}
+    return {
+        "status": "ingested",
+        "files": len(filtered_docs),
+        "chunks": total_chunks
+    }
 
 
 @app.post('/clear')
 def clear():
     """Delete the Chroma collection named 'docs' to clear the document database."""
     try:
-        chroma_client.delete_collection(name="docs")
+        coll.delete_collection(name="docs")
     except Exception:
         # ignore errors during delete
         pass
@@ -273,7 +328,6 @@ def rag_agent(query, history=None, max_iters=3, top_k=TOP_K_RESULTS):
 
         # 1. Retrieve
         q_emb = ollama_embed([current_query])[0]
-        coll = chroma_client.get_collection(name="docs")
 
         res = coll.query(
             query_embeddings=[q_emb],
