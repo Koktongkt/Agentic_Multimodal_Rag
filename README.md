@@ -1,6 +1,6 @@
 ## 🧠 Agentic RAG with Web Search
 
-This project implements an **agentic Retrieval-Augmented Generation (RAG)** system with integrated **web search capabilities** (Google / DuckDuckGo) via langgraph and local llm model via ollama/gemma4:26b.
+This project implements an **agentic Retrieval-Augmented Generation (RAG)** system with integrated **web search capabilities** (Google / DuckDuckGo) via langgraph and local llm model via ollama/gemma4:26b. The goal is to run an agentic multimodal rag in a local system.
 
 ---
 
@@ -30,9 +30,7 @@ Responsible for:
 ### 2. RAG Agent (Vector Retrieval)
 
 Handles:
-- Document ingestion
-- Embedding + storage
-- Semantic retrieval
+- Semantic retrieval via query embedding
 
 #### Workflow:
 1. Receive query from Manager
@@ -125,9 +123,16 @@ Uses FastApi to communicate between backend and frontend
 /ingest and Force=True to rebult database entirely
 /vision to read image and output response in json format
 
+## RAG ingestion method
+- Uses MarkItDown to convert files of multiple forms (docx, xlsx, pdf, etc) into markdowns
+- Chunking selection (adjustable in config.py) with ollama embed model mxbai-embed-large (also adjustable in config.py)
+- Chunks embeddings are stored in Chroma_db
+- Hashlib is used together to store the source (docs path) together with the files in chroma_db
+  - Hash_file helper function takes the path file as input, opens the file and hashes the content
+- For new documents / updated parts of same documents, the hash key will be used to check whether the same chunks of the doc in chroma db needs to be replaced anot
+
 
 ### Future updates
 - Graph RAG option for user
 - Upload button in chat UI for user to upload and update vector database
-- Production grade hash file metadata incorporate to filter for new documents for selected embedding ingestion into RAG database
 ---
