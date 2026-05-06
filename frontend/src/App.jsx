@@ -87,6 +87,8 @@ export default function App(){
     setShowIngestModal(true)
   }
 
+  const canSend = (input && input.trim().length > 0) || !!image
+
   const ingest = async (force=false, filesParam=null) => {
     setIngesting(true)
     setStatusMsg('Ingesting documents...')
@@ -230,8 +232,8 @@ export default function App(){
         />
 
         {/* 🚀 send button */}
-        <button className="send-btn" onClick={send} disabled={loading}>
-          {loading ? '...' : 'Send'}
+        <button className={`send-btn ${canSend ? 'active' : ''}`} onClick={send} disabled={!canSend || loading}>
+          {loading ? '...' : (canSend ? '➤' : 'Send')}
         </button>
       </div>
       {showIngestModal && (

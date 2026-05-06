@@ -51,16 +51,54 @@ body {
   cursor: pointer;
   font-size: 12px;
   color: var(--color-text-secondary, #555450);
-  transition: background 0.12s;
+  transition: all 0.12s;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-.controls button:hover {
-  background: var(--color-background-secondary, #f7f6f2);
+/* PRIMARY (filled dark) */
+.controls .btn-primary {
+  background: var(--color-text-primary, #1a1a18);
+  color: white;
+  border: none;
+}
+
+.controls .btn-primary:hover {
+  opacity: 0.80;
+}
+
+/* SECONDARY (soft filled) */
+.controls .btn-soft {
+  background: var(--color-background-secondary, #024e4a);
+  color: white;
+  border: 1px solid #0000007c;
+}
+
+.controls .btn-soft:hover {
+  opacity: 0.70;
+}
+
+/* DANGER (for clear DB) */
+.controls .btn-danger {
+  background: var(--color-background-secondary, #fd0303);
+  color: white;
+  border: 1px solid #0000007c;
+}
+
+.controls .btn-danger:hover {
+  opacity: 0.70;
 }
 
 .controls button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: nowrap;
 }
 
 /* CHAT WINDOW */
@@ -158,25 +196,41 @@ body {
   box-shadow: 0 0 0 2px rgba(0,0,0,0.04);
 }
 
-/* SEND BUTTON — circular, filled */
+/* SEND BUTTON — dynamic */
 .chat-input button.send-btn {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  border: none;
-  background: var(--color-text-primary, #1a1a18);
-  color: var(--color-background-primary, #ffffff);
+  border: 0.5px solid var(--color-border-tertiary, rgba(0,0,0,0.12));
+  background: transparent;
+  color: var(--color-text-secondary, #555450);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: opacity 0.12s, transform 0.1s;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
 }
 
-.chat-input button.send-btn:hover {
-  opacity: 0.8;
-  transform: scale(1.04);
+.chat-input button.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-input button.send-btn.active {
+  background: #ff3b30; /* red fill */
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 4px 10px rgba(255,59,48,0.18);
+}
+
+.chat-input button.send-btn.active:hover {
+  transform: scale(1.06);
+  opacity: 1;
+}
+
+.chat-input button.send-btn:not(.active):hover {
+  background: rgba(0,0,0,0.03);
 }
 
 /* IMAGE UPLOAD */
@@ -216,4 +270,78 @@ body {
   color: var(--color-text-tertiary, #999893);
   border-top: 0.5px solid var(--color-border-tertiary, rgba(0,0,0,0.12));
   background: var(--color-background-secondary, #f7f6f2);
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.18); /* softer overlay */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+}
+
+/* MATCH CHAT CARD STYLE */
+.modal {
+  background: var(--color-background-primary, #ffffff);
+  border: 0.5px solid var(--color-border-tertiary, rgba(0,0,0,0.12));
+  border-radius: 14px;
+  width: 320px;
+  padding: 16px 18px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.08); /* softer */
+}
+
+/* TITLE */
+.modal h3 {
+  margin: 0 0 6px 0;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary, #1a1a18);
+}
+
+/* DESCRIPTION */
+.modal p {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #999893);
+  margin: 0 0 12px 0;
+  line-height: 1.5;
+}
+
+/* ACTION ROW */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* BUTTON STYLE = match your controls */
+.modal button {
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 0.5px solid var(--color-border-secondary, rgba(0,0,0,0.2));
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-secondary, #555450);
+  transition: background 0.12s;
+}
+
+.modal button:hover {
+  background: var(--color-background-secondary, #f7f6f2);
+}
+
+/* PRIMARY ACTION (Upload) */
+.modal button.primary {
+  background: var(--color-text-primary, #1a1a18);
+  color: var(--color-background-primary, #ffffff);
+  border: none;
+}
+
+.modal button.primary:hover {
+  opacity: 0.85;
 }
