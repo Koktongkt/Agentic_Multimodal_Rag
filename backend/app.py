@@ -25,7 +25,7 @@ from .vision import call_ollama_vision, router as vision_router
 
 # Import configuration
 from .config import (
-    DOCS_DIR, CHROMA_DB_PATH, OLLAMA_BASE_URL, EMBEDDING_MODEL, LLM_MODEL,
+    DOCS_DIR, OLLAMA_BASE_URL, EMBEDDING_MODEL, LLM_MODEL,
     CHUNK_SIZE, CHUNK_OVERLAP, WEB_SEARCH_MAX_RESULTS, TOP_K_RESULTS, LLM_TEMPERATURE, LLM_MAX_TOKENS
 )
 
@@ -309,6 +309,87 @@ def clear():
         pass
 
     return {"status": "cleared"}
+
+
+@app.post('/upload')
+async def upload_endpoint(store: bool = False, query: str = "", files: Optional[List[UploadFile]] = File(None)):
+    """Unified upload endpoint used by the frontend.
+    Accepts image and document files. If `store` is true files are saved to DOCS_DIR and an ingest is triggered.
+    For images, route through the manager (LangGraph) when available so routing/aggregation applies.
+    """
+    results = []
+    try:
+        if not files:
+            return {"results": [], "error": "no files uploaded"}
+
+        # ensure docs dir exists if storing
+        if store and not os.path.exists(DOCS_DIR):
+            os.makedirs(DOCS_DIR, exist_ok=True)
+
+        for up in files:
+            filename = os.path.basename(up.filename)
+            entry = {"filename": filename}
+            try:
+                # read content (support async UploadFile)
+                try:
+                    content = await up.read()
+                except Exception:
+                    content = up.file.read()
+
+                # simple image detection
+                ext = os.path.splitext(filename)[1].lower()
+                is_image = (up.content_type and up.content_type.startswith("image")) or ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"]
+
+                if is_image:
+                    import base64 as _b64
+                    image_b64 = _b64.b64encode(content).decode("utf-8")
+                    # If the LangGraph manager is available, invoke it so vision runs through manager_node and aggregator
+                    try:
+                        if compiled_graph is not None:
+                            out = compiled_graph.invoke({
+                                "message": query or "",
+                                "image_b64": image_b64,
+                                "history": []
+                            })
+                            # The compiled graph returns a dict with 'response' key when successful
+                            resp = out.get("response", out)
+                            entry["vision_manager"] = resp
+                        else:
+                            # fallback: call vision directly
+                            vis = call_ollama_vision(query or "Describe the image in detail.", image_b64, LLM_MODEL)
+                            entry["vision"] = vis["message"]["content"] if isinstance(vis, dict) and "message" in vis else vis
+                    except Exception as e:
+                        entry["error"] = str(e)
+                else:
+                    # non-image: save if requested, otherwise just acknowledge
+                    if store:
+                        dest = os.path.join(DOCS_DIR, filename)
+                        try:
+                            with open(dest, "wb") as f:
+                                f.write(content)
+                            entry["stored"] = True
+                        except Exception as e:
+                            entry["error"] = f"Failed saving file: {e}"
+                    else:
+                        entry["note"] = "file received"
+
+            except Exception as e:
+                entry["error"] = str(e)
+
+            results.append(entry)
+
+        ingest_result = None
+        if store:
+            # Trigger ingest to index saved files. Call ingest() directly so it reads DOCS_DIR
+            try:
+                ingest_result = ingest(False)
+            except Exception as e:
+                ingest_result = {"error": str(e)}
+
+        return {"results": results, "ingest": ingest_result}
+
+    except Exception as e:
+        return {"results": results, "error": str(e)}
 
 
 def extract_json(text: str):
