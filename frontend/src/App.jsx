@@ -78,16 +78,32 @@ export default function App(){
 
   const onKey = (e) => { if(e.key === 'Enter') send() }
 
-  const ingest = async (force=false) => {
+  const handleStoreIngest = () => {
+    // If files already selected, just ingest them
+    if (docFiles && docFiles.length > 0) {
+      ingest(false)
+      return
+    }
+    // Ask user if they want to upload files first
+    const ok = window.confirm("Upload documents before ingest? OK = choose files; Cancel = ingest without uploading.")
+    if (ok) {
+      docFileRef.current.click()
+    } else {
+      ingest(false)
+    }
+  }
+
+  const ingest = async (force=false, filesParam=null) => {
     setIngesting(true)
     setStatusMsg('Ingesting documents...')
     try{
       const url = `http://localhost:8000/ingest${force ? '?force=true' : ''}`
       let res
-      if (docFiles && docFiles.length > 0) {
+      const filesToUse = filesParam || docFiles
+      if (filesToUse && filesToUse.length > 0) {
         const form = new FormData()
-        for (let i=0;i<docFiles.length;i++) {
-          form.append('files', docFiles[i])
+        for (let i=0;i<filesToUse.length;i++) {
+          form.append('files', filesToUse[i])
         }
         res = await fetch(url, { method: 'POST', body: form })
         setDocFiles(null)
@@ -120,8 +136,7 @@ export default function App(){
         <div className="title">Agent Gemma</div>
         <div className="subtitle">Ask questions, upload images or explore your documents!</div>
         <div className="controls">
-          <button onClick={()=>docFileRef.current.click()} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Upload Docs'}</button>
-          <button onClick={()=>ingest(false)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Store & Ingest Docs'}</button>
+          <button onClick={handleStoreIngest} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Store & Ingest Docs'}</button>
           <button onClick={()=>ingest(true)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Rebuild (force)'}</button>
           <button onClick={clearDb} disabled={clearing || ingesting}>{clearing ? 'Clearing...' : 'Clear Database'}</button>
           {docFiles && docFiles.length > 0 && <div style={{marginLeft:10}}>{docFiles.length} file(s) selected</div>}
@@ -182,6 +197,7 @@ export default function App(){
             const files = Array.from(e.target.files || [])
             if (files.length === 0) return
             setDocFiles(files)
+            ingest(false, files)
             e.target.value = null
           }}
         />
