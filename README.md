@@ -109,11 +109,12 @@ Fallback:
 
 ## Frontend UI
 
- Use React Chat as Frontend UI to build the interface
- @CHAT via SEND button for user to send a query
- @INGEST via Ingest docs button for user to ingest documents from the local database
- @CLEAR via clear database button for user to clear the vector database (chromadb)
- @CLEAR and FORCE=TRUE via Force Clear and rebuilt button to rebuilt database entirely
+### Use React Chat as Frontend UI to build the interface:
+ - /CHAT via SEND button for user to send a query
+ - /INGEST via Upload & Ingest Docs button for user to ingest documents from the local database
+  - User can upload docs to ingest new docs, or skip and reingest current docs (if docs already exist in vector db, then no reingestion)
+ - /CLEAR via clear database button for user to clear the vector database (chromadb)
+ - /CLEAR and FORCE=TRUE via Force Clear and rebuilt button to rebuilt database entirely
 
 ## Communication protocol
  
@@ -134,5 +135,5 @@ Uses FastApi to communicate between backend and frontend
 
 ### Future updates
 - Graph RAG option for user
-- Upload button in chat UI for user to upload and update vector database
+- Improve upload image button to include files as well, and later allow flexbility to ingest the doc if user requests
 ---
