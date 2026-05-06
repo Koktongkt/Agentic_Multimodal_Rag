@@ -10,6 +10,8 @@ export default function App(){
   const [image, setImage] = useState(null)
   const [preview, setPreview] = useState(null)
   const fileRef = useRef(null)
+  const docFileRef = useRef(null)
+  const [docFiles, setDocFiles] = useState(null)
   const [history, setHistory] = useState([])
 
   const toBase64 = (file) =>
@@ -81,7 +83,17 @@ export default function App(){
     setStatusMsg('Ingesting documents...')
     try{
       const url = `http://localhost:8000/ingest${force ? '?force=true' : ''}`
-      const res = await fetch(url, {method:'POST'})
+      let res
+      if (docFiles && docFiles.length > 0) {
+        const form = new FormData()
+        for (let i=0;i<docFiles.length;i++) {
+          form.append('files', docFiles[i])
+        }
+        res = await fetch(url, { method: 'POST', body: form })
+        setDocFiles(null)
+      } else {
+        res = await fetch(url, {method:'POST'})
+      }
       const data = await res.json()
       setStatusMsg(JSON.stringify(data))
     }catch(e){
@@ -105,12 +117,14 @@ export default function App(){
   return (
     <div className="chat-root">
       <div className="topbar">
-        <div className="title">Friendly Chat</div>
-        <div className="subtitle">Ask questions or explore your documents</div>
+        <div className="title">Agent Gemma</div>
+        <div className="subtitle">Ask questions, upload images or explore your documents!</div>
         <div className="controls">
-          <button onClick={()=>ingest(false)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Ingest Docs'}</button>
-          <button onClick={()=>ingest(true)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Rebuild & Ingest (force)'}</button>
+          <button onClick={()=>docFileRef.current.click()} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Upload Docs'}</button>
+          <button onClick={()=>ingest(false)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Store & Ingest Docs'}</button>
+          <button onClick={()=>ingest(true)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Rebuild (force)'}</button>
           <button onClick={clearDb} disabled={clearing || ingesting}>{clearing ? 'Clearing...' : 'Clear Database'}</button>
+          {docFiles && docFiles.length > 0 && <div style={{marginLeft:10}}>{docFiles.length} file(s) selected</div>}
         </div>
       </div>
 
@@ -153,6 +167,21 @@ export default function App(){
 
             setImage(file)
             setPreview(URL.createObjectURL(file))
+            e.target.value = null
+          }}
+        />
+
+        {/* hidden docs file input */}
+        <input
+          ref={docFileRef}
+          type="file"
+          accept=".pdf,.md,.txt,.docx"
+          hidden
+          multiple
+          onChange={(e) => {
+            const files = Array.from(e.target.files || [])
+            if (files.length === 0) return
+            setDocFiles(files)
             e.target.value = null
           }}
         />

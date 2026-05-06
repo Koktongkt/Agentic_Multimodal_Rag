@@ -1,5 +1,5 @@
 import chunk
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -9,7 +9,7 @@ import requests
 import time
 import hashlib # file hashing for better rag
 
-from typing import List, Dict
+from typing import List, Dict, Optional
 from websockets import route
 from .document_ingestor import DocumentIngestor
 from .web_search import web_search_agent
@@ -157,9 +157,26 @@ def chunk_hash(text):
 
 
 @app.post('/ingest')
-def ingest(force: bool = False):
+def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
+    # Ensure docs dir exists or create it if files are uploaded
     if not os.path.exists(DOCS_DIR):
-        return {"status": "docs folder not found"}
+        if not files:
+            return {"status": "docs folder not found"}
+        os.makedirs(DOCS_DIR, exist_ok=True)
+
+    # Save uploaded files to DOCS_DIR if any were provided
+    if files:
+        saved = []
+        for up in files:
+            try:
+                filename = os.path.basename(up.filename)
+                dest = os.path.join(DOCS_DIR, filename)
+                with open(dest, "wb") as f:
+                    f.write(up.file.read())
+                saved.append(filename)
+            except Exception as e:
+                print("Failed saving uploaded file:", up.filename, e)
+        print("Saved uploaded files:", saved)
 
     if force:
         try:
