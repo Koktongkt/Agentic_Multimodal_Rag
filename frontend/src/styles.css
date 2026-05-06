@@ -256,10 +256,10 @@ body {
 .image-upload button {
   padding: 7px 9px;
   border-radius: 8px;
-  border: 0.5px solid var(--color-border-secondary, rgba(0,0,0,0.2));
+  border: 1px solid var(--color-border-secondary, rgba(0,0,0,0.2));
   background: transparent;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 16px;
   color: var(--color-text-secondary, #555450);
   transition: background 0.12s;
 }
@@ -357,4 +357,31 @@ body {
 
 .modal button.primary:hover {
   opacity: 0.85;
+}
+
+/* typing dots for assistant loading state */
+.typing-dots {
+  display: inline-flex;     
+  align-items: center;
+  gap: 3px;                
+  white-space: nowrap;      
+}
+
+.typing-dots span {
+  display: inline-flex;
+  width: 6px;
+  height: 6px;
+  margin: 0 3px;
+  background: #666;
+  border-radius: 50%;
+  opacity: 0.4;
+  animation: typing-bounce 1s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4 }
+  40% { transform: translateY(-6px); opacity: 1 }
 }

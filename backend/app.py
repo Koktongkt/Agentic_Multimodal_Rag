@@ -8,8 +8,10 @@ import json
 import requests
 import time
 import hashlib # file hashing for better rag
+import base64
+import tempfile
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from websockets import route
 from .document_ingestor import DocumentIngestor
 from .web_search import web_search_agent
@@ -48,8 +50,12 @@ from ddgs import DDGS
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str | None = None
     image_b64: str | None = None
+    file_b64: str | None = None
+    filename: str | None = None
+    file_mime: str | None = None
+    query: str | None = None
     history: list[dict] | None = None
 
 
@@ -154,7 +160,6 @@ def file_hash(filepath):
 
 def chunk_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
 
 @app.post('/ingest')
 def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
@@ -291,7 +296,6 @@ def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
         "chunks": total_chunks
     }
 
-
 @app.post('/clear')
 def clear():
     """Delete the Chroma collection named 'docs' to clear the document database."""
@@ -309,88 +313,6 @@ def clear():
         pass
 
     return {"status": "cleared"}
-
-
-@app.post('/upload')
-async def upload_endpoint(store: bool = False, query: str = "", files: Optional[List[UploadFile]] = File(None)):
-    """Unified upload endpoint used by the frontend.
-    Accepts image and document files. If `store` is true files are saved to DOCS_DIR and an ingest is triggered.
-    For images, route through the manager (LangGraph) when available so routing/aggregation applies.
-    """
-    results = []
-    try:
-        if not files:
-            return {"results": [], "error": "no files uploaded"}
-
-        # ensure docs dir exists if storing
-        if store and not os.path.exists(DOCS_DIR):
-            os.makedirs(DOCS_DIR, exist_ok=True)
-
-        for up in files:
-            filename = os.path.basename(up.filename)
-            entry = {"filename": filename}
-            try:
-                # read content (support async UploadFile)
-                try:
-                    content = await up.read()
-                except Exception:
-                    content = up.file.read()
-
-                # simple image detection
-                ext = os.path.splitext(filename)[1].lower()
-                is_image = (up.content_type and up.content_type.startswith("image")) or ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"]
-
-                if is_image:
-                    import base64 as _b64
-                    image_b64 = _b64.b64encode(content).decode("utf-8")
-                    # If the LangGraph manager is available, invoke it so vision runs through manager_node and aggregator
-                    try:
-                        if compiled_graph is not None:
-                            out = compiled_graph.invoke({
-                                "message": query or "",
-                                "image_b64": image_b64,
-                                "history": []
-                            })
-                            # The compiled graph returns a dict with 'response' key when successful
-                            resp = out.get("response", out)
-                            entry["vision_manager"] = resp
-                        else:
-                            # fallback: call vision directly
-                            vis = call_ollama_vision(query or "Describe the image in detail.", image_b64, LLM_MODEL)
-                            entry["vision"] = vis["message"]["content"] if isinstance(vis, dict) and "message" in vis else vis
-                    except Exception as e:
-                        entry["error"] = str(e)
-                else:
-                    # non-image: save if requested, otherwise just acknowledge
-                    if store:
-                        dest = os.path.join(DOCS_DIR, filename)
-                        try:
-                            with open(dest, "wb") as f:
-                                f.write(content)
-                            entry["stored"] = True
-                        except Exception as e:
-                            entry["error"] = f"Failed saving file: {e}"
-                    else:
-                        entry["note"] = "file received"
-
-            except Exception as e:
-                entry["error"] = str(e)
-
-            results.append(entry)
-
-        ingest_result = None
-        if store:
-            # Trigger ingest to index saved files. Call ingest() directly so it reads DOCS_DIR
-            try:
-                ingest_result = ingest(False)
-            except Exception as e:
-                ingest_result = {"error": str(e)}
-
-        return {"results": results, "ingest": ingest_result}
-
-    except Exception as e:
-        return {"results": results, "error": str(e)}
-
 
 def extract_json(text: str):
     """Layer 2: robust JSON extraction"""
@@ -573,6 +495,7 @@ class GraphState(TypedDict):
     rag: dict
     web: dict
     vision: dict
+    document: Dict[str, Any]  # optional document info: filename, content, type
     response: dict
 
 
@@ -583,40 +506,62 @@ try:
         message = state.get("message", "")
         image = state.get("image_b64")
         history = state.get("history", [])
+        document = state.get("document")
 
         history_text = "\n".join(
-            [f"{h['role']}: {h['content']}" for h in history[-10:]]  # last 10 turns
+            [f"{h['role']}: {h['content']}" for h in history[-10:]]
         )
 
+        doc_text = ""
+        if document and document.get("content"):
+            doc_text = document["content"][:4000]
+
         prompt = f"""
-        You are a routing system.
+        You are a routing and reasoning system.
 
         Conversation history:
         {history_text}
 
+        User message:
+        {message}
+
         Image present: {"yes" if image else "no"}
 
-        You must decide ALL applicable routes. Multiple routes CAN be true at the same time.
-        Take note of the Conversation history as it may provide important context for routing decisions.
+        Document present: {"yes" if doc_text else "no"}
 
-        Return ONLY valid JSON in this format:
+        Document content (if any):
+        {doc_text}
+
+        ---
+
+        You must decide ALL applicable routes. Multiple routes can be true.
+
+        Return ONLY valid JSON:
 
         {{
         "vision": true or false,
         "rag": true or false,
         "web": true or false,
         "direct": true or false,
-        "direct_answer": "ONLY if direct=true, return the answer to the question, otherwise empty string"
+        "direct_answer": "ONLY if you can confidently answer directly OR using the document. Otherwise empty string."
         }}
 
-        Rules:
-        - vision = true if image is present or question about image
-        - rag = true if question requires documents or definitions on topic of covid19
-        - web = true if question requires recent / external information, or if it is a general knowledge question that can be answered better with web search
-        - direct = true if general knowledge question that is considered simple and no image present.
+        ---
 
-        Query:
-        {message}
+        RULES:
+        vision: true if image is present or question refers to image
+        rag: true if question requires knowledge on the topic of covid19 as the documents are about covid19
+        web: true if question requires external or recent information
+        direct: true if simple general knowledge question or document is attached
+        direct_answer:
+        - If document is present AND contains answer → use it
+        - If document is present AND no query, summarize document as answer.
+        - If no document but simple question → answer directly
+        - If unsure → return empty string
+
+        IMPORTANT:
+        - If document is irrelevant → ignore it completely
+        - Do NOT assume document is useful just because it exists
         """
 
         result = llm_generate(prompt, temperature=0)
@@ -634,7 +579,7 @@ try:
         # fallback safety
         if not any(route.values()):
             route = {
-                "vision": image is not None,
+                "vision": bool(image),
                 "rag": False,
                 "web": False,
                 "direct": True
@@ -830,13 +775,40 @@ except Exception as e:
 @app.post('/chat')
 def chat(req: ChatRequest):
 
+    # Handle optional file upload (base64) and convert to markdown using DocumentIngestor/MarkItDown
+    document = None
+    tmp_path = None
+    if req.file_b64 and req.filename:
+        try:
+            # write to temp file
+            tmpdir = tempfile.gettempdir()
+            safe_name = os.path.basename(req.filename)
+            tmp_path = os.path.join(tmpdir, safe_name)
+            with open(tmp_path, 'wb') as f:
+                f.write(base64.b64decode(req.file_b64))
+
+            ingestor = DocumentIngestor()
+            document = ingestor.load_file(tmp_path)
+        except Exception as e:
+            print(f"Failed converting uploaded document: {e}")
+            document = None
+        finally:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
     if compiled_graph is not None:
         try:
-            out = compiled_graph.invoke({
-                "message": req.message,
+            state = {
+                "message": req.query or req.message or "",
                 "image_b64": req.image_b64,
-                "history": req.history or []
-            })
+                "history": req.history or [],
+                "document": document
+            }
+
+            out = compiled_graph.invoke(state)
 
             return out.get("response", {
                 "status": "no_response"

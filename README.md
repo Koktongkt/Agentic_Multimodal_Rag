@@ -12,18 +12,19 @@ The system consists of five core agents:
 
 Responsible for:
 - Handling user queries
-- Routing tasks to appropriate agents
-- Combining outputs into a final response
+- Routing tasks to appropriate agents by providing a boolean route output
 
 #### Responsibilities:
 - Detect query type:
-  - Knowledge-based → RAG
-  - Real-time / external → Web Search
+  - Knowledge-based → RAG (manager agent prompt need to mention what kind of topic e.g. currently it is grounded in covid19)
+  - Real-time / external knowledge / complex queries → Web Search
   - Complex → Both
-  - Vision
+  - Vision when Image is attached
+  - Direct answer if simple query or attached document
+
 - Manage user actions:
-  - Document upload
-  - Database reset
+  - Document / Image upload
+  - User's query
 
 ---
 
@@ -83,28 +84,11 @@ The Manager Agent determines which agents to invoke:
 | Real-time info | Web Search only |
 | Image Understanding | Vision only |
 | Complex / uncertain | More than one agent |
-| Simple query | Direct|
+| Simple query, documents attachment | Direct|
 
 Fallback:
-- If RAG returns low relevance → trigger Web Search
-- If Web Search fails → fallback to RAG
+- Hardcoded rules to decide to use RAG or Web Search using keywords based
 
----
-
-## 🔗 Agent Interfaces
-
-### RAG Agent
-
-
-```json
-{
-  "input": "query string",
-  "output": {
-    "documents": ["chunk1", "chunk2"],
-    "scores": [0.92, 0.87]
-  }
-}
-```
 ---
 
 ## Frontend UI
@@ -135,5 +119,5 @@ Uses FastApi to communicate between backend and frontend
 
 ### Future updates
 - Graph RAG option for user
-- Improve upload image button to include files as well, and later allow flexbility to ingest the doc if user requests
+- Allow flexbility to ingest the doc if user requests, after uploading a document for chat reasoning.
 ---
