@@ -13,6 +13,7 @@ export default function App(){
   const docFileRef = useRef(null)
   const [docFiles, setDocFiles] = useState(null)
   const [history, setHistory] = useState([])
+  const [showIngestModal, setShowIngestModal] = useState(false)
 
   const toBase64 = (file) =>
   new Promise((resolve, reject) => {
@@ -79,18 +80,11 @@ export default function App(){
   const onKey = (e) => { if(e.key === 'Enter') send() }
 
   const handleStoreIngest = () => {
-    // If files already selected, just ingest them
     if (docFiles && docFiles.length > 0) {
       ingest(false)
       return
     }
-    // Ask user if they want to upload files first
-    const ok = window.confirm("Upload documents before ingest? OK = choose files; Cancel = ingest without uploading.")
-    if (ok) {
-      docFileRef.current.click()
-    } else {
-      ingest(false)
-    }
+    setShowIngestModal(true)
   }
 
   const ingest = async (force=false, filesParam=null) => {
@@ -136,10 +130,35 @@ export default function App(){
         <div className="title">Agent Gemma</div>
         <div className="subtitle">Ask questions, upload images or explore your documents!</div>
         <div className="controls">
-          <button onClick={handleStoreIngest} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Store & Ingest Docs'}</button>
-          <button onClick={()=>ingest(true)} disabled={ingesting || clearing}>{ingesting ? 'Ingesting...' : 'Rebuild (force)'}</button>
-          <button onClick={clearDb} disabled={clearing || ingesting}>{clearing ? 'Clearing...' : 'Clear Database'}</button>
-          {docFiles && docFiles.length > 0 && <div style={{marginLeft:10}}>{docFiles.length} file(s) selected</div>}
+          <button
+            className="btn-primary"
+            onClick={handleStoreIngest}
+            disabled={ingesting || clearing}
+          >
+            {ingesting ? 'Ingesting...' : 'Store & Ingest Docs'}
+          </button>
+
+          <button
+            className="btn-soft"
+            onClick={() => ingest(true)}
+            disabled={ingesting || clearing}
+          >
+            {ingesting ? 'Ingesting...' : 'Rebuild Database'}
+          </button>
+
+          <button
+            className="btn-danger"
+            onClick={clearDb}
+            disabled={clearing || ingesting}
+          >
+            {clearing ? 'Clearing...' : 'Clear Database'}
+          </button>
+
+          {docFiles?.length > 0 && (
+            <div className="file-badge">
+              {docFiles.length} file(s)
+            </div>
+          )}
         </div>
       </div>
 
@@ -211,10 +230,46 @@ export default function App(){
         />
 
         {/* 🚀 send button */}
-        <button onClick={send} disabled={loading}>
+        <button className="send-btn" onClick={send} disabled={loading}>
           {loading ? '...' : 'Send'}
         </button>
       </div>
+      {showIngestModal && (
+        <div className="modal-overlay">
+          <div className="modal">
+            <h3>Upload Documents?</h3>
+            <p>
+              Press Upload to select files first, or Skip to ingest current documents.
+            </p>
+
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setShowIngestModal(false)
+                  docFileRef.current.click()
+                }}
+              >
+                Upload Files
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowIngestModal(false)
+                  ingest(false)
+                }}
+              >
+                Skip
+              </button>
+
+              <button
+                onClick={() => setShowIngestModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
