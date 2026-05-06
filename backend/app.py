@@ -235,7 +235,7 @@ def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
         filtered_docs.append(d)
 
     if not filtered_docs:
-        return {"status": "no_new_or_updated_documents"}
+        return {"status": "no new or updated documents"}
 
     # --- Chunking ---
     chunks = ingestor.chunk_documents(filtered_docs)
@@ -296,10 +296,18 @@ def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
 def clear():
     """Delete the Chroma collection named 'docs' to clear the document database."""
     try:
-        coll.delete_collection(name="docs")
+        chroma_client.delete_collection(name="docs")
     except Exception:
         # ignore errors during delete
         pass
+
+    # Re-create the in-process collection object so subsequent ingest calls use a valid, empty collection
+    global coll
+    try:
+        coll = chroma_client.get_or_create_collection("docs")
+    except Exception:
+        pass
+
     return {"status": "cleared"}
 
 
