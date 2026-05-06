@@ -36,6 +36,19 @@ body {
   color: var(--color-text-primary, #1a1a18);
 }
 
+.title-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.title-icon {
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
+  opacity: 0.9;
+}
+
 .subtitle {
   color: var(--color-text-tertiary, #999893);
   font-size: 12px;
@@ -213,7 +226,7 @@ body {
 }
 
 .chat-input button.send-btn:disabled {
-  opacity: 0.5;
+  opacity: 0;
   cursor: not-allowed;
 }
 

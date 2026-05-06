@@ -129,7 +129,10 @@ export default function App(){
   return (
     <div className="chat-root">
       <div className="topbar">
-        <div className="title">Agent Gemma</div>
+        <div className="title-wrapper">
+          <img src="/robot_icon.jpg" className="title-icon" />
+          <div className="title">Agent Gemma</div>
+        </div>
         <div className="subtitle">Ask questions, upload images or explore your documents!</div>
         <div className="controls">
           <button
