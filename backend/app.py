@@ -30,7 +30,7 @@ from .config import (
 )
 
 # Import chromadb collection
-from .db import collection as coll
+from .db import collection as coll, chroma_client
 
 app = FastAPI(title="Agentic RAG Backend (Chroma + Ollama + LangGraph)")
 app.add_middleware(
@@ -180,7 +180,13 @@ def ingest(force: bool = False, files: Optional[List[UploadFile]] = File(None)):
 
     if force:
         try:
-            coll.delete_collection(name="docs")
+            chroma_client.delete_collection(name="docs")
+        except Exception:
+            pass
+        # Recreate the collection object so subsequent calls use a fresh, empty collection
+        global coll
+        try:
+            coll = chroma_client.get_or_create_collection("docs")
         except Exception:
             pass
 
