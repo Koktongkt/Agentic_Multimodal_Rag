@@ -468,7 +468,6 @@ def rag_agent(query, history=None, max_iters=3, top_k=TOP_K_RESULTS):
         "context": last_context
     }
 
-
 # hardcoded heuristic routing as fallback when LangGraph is not available or fails
 def route_query(message: str):
     m = message.lower()
@@ -482,6 +481,53 @@ def route_query(message: str):
         return 'rag'
     return 'both'
 
+# use in document agent when user want to request to store relevant doc in rag
+def is_duplicate_document(source: str, f_hash: str) -> bool:
+    try:
+        results = coll.get(include=["metadatas"])
+        for m in results.get("metadatas", []):
+            if m and m.get("source") == source and m.get("file_hash") == f_hash:
+                return True
+    except Exception:
+        pass
+    return False
+
+# run this when the document uploaded in chat needs to be stored in vector db and is not duplicated from current vector db
+def ingest_single_document(doc, source, f_hash):
+    chunks = DocumentIngestor().splitter.split_text(doc["content"])
+
+    docs_batch = chunks
+    ids_batch = [f"{source}_{chunk_hash(c)}" for c in chunks]
+
+    metas_batch = [
+        {
+            "source": source,
+            "chunk_index": i,
+            "file_hash": f_hash  
+        }
+        for i, _ in enumerate(chunks)
+    ]
+
+    embs = ollama_embed(docs_batch)
+    
+    print(f"\nSuccessfully embedded {len(chunks)} chunks from: {source}")
+    coll.add(
+        documents=docs_batch,
+        metadatas=metas_batch,
+        ids=ids_batch,
+        embeddings=embs
+    )
+
+def save_raw_file(file_b64, filename, docs_dir="docs"):
+    os.makedirs(docs_dir, exist_ok=True)
+
+    safe_name = os.path.basename(filename)
+    filepath = os.path.join(docs_dir, safe_name)
+
+    with open(filepath, "wb") as f:
+        f.write(base64.b64decode(file_b64))
+
+    return filepath
 
 # Build a LangGraph manager graph to orchestrate RAG and Web Search with separate agents
 GRAPH_AVAILABLE = True
@@ -495,8 +541,11 @@ class GraphState(TypedDict):
     rag: dict
     web: dict
     vision: dict
+    doc: dict
     document: Dict[str, Any]  # optional document info: filename, content, type
     response: dict
+    file_b64: str | None
+    filename: str | None
 
 
 try:
@@ -542,8 +591,9 @@ try:
         "vision": true or false,
         "rag": true or false,
         "web": true or false,
+        "doc": true or false,
         "direct": true or false,
-        "direct_answer": "ONLY if you can confidently answer directly OR using the document. Otherwise empty string."
+        "direct_answer": "ONLY if you can confidently answer directly Otherwise empty string."
         }}
 
         ---
@@ -552,16 +602,9 @@ try:
         vision: true if image is present or question refers to image
         rag: true if question requires knowledge on the topic of covid19 as the documents are about covid19
         web: true if question requires external or recent information
-        direct: true if simple general knowledge question or document is attached
-        direct_answer:
-        - If document is present AND contains answer → use it
-        - If document is present AND no query, summarize document as answer.
-        - If no document but simple question → answer directly
-        - If unsure → return empty string
-
-        IMPORTANT:
-        - If document is irrelevant → ignore it completely
-        - Do NOT assume document is useful just because it exists
+        doc: true if document is present. If user requests for storage of the document, true.
+        direct: true if simple general knowledge question. If an image or document is present, false.
+        direct_answer: If direct is true, provide a concise answer here. Only provide an answer if you are very confident and can be concise.
         """
 
         result = llm_generate(prompt, temperature=0)
@@ -571,6 +614,7 @@ try:
             "vision": data.get("vision", False),
             "rag": data.get("rag", False),
             "web": data.get("web", False),
+            "doc": data.get("doc", False),
             "direct": data.get("direct", False),
         }
         print(f"Routing decision: {route}")
@@ -582,6 +626,7 @@ try:
                 "vision": bool(image),
                 "rag": False,
                 "web": False,
+                "doc": False,
                 "direct": True
             }
 
@@ -600,6 +645,102 @@ try:
 
         rag_response = rag_agent(message, history=history)
         return {"rag": rag_response}
+    
+
+    def document_agent_node(state: GraphState) -> GraphState:
+        """Process attached document if route requires it."""
+
+        route = state["route"]
+
+        if not route.get("doc"):
+            return {}
+
+        document = state.get("document")
+        message = state.get("message", "")
+        history_text = state.get("history", [])
+
+        if not document or not document.get("content"):
+            return {}
+
+        doc_text = document["content"][:4000]
+
+        doc_prompt = f"""
+        You are a document processing agent.
+
+        Document content:
+        {doc_text}
+
+        User message:
+        {message}
+
+        Conversation history:
+        {history_text}
+
+        If user requests to store/save/remember/index the document
+        for future retrieval, set "store": true.
+
+        Return ONLY valid JSON:
+
+        {{
+        "answer": "...",
+        "store": true or false
+        }}
+        """
+
+        doc_response = llm_generate(doc_prompt)
+
+        data = extract_json(doc_response) or {}
+
+        doc_answer = data.get("answer", "")
+        doc_store = data.get("store", False)
+
+        # STORE + INGEST
+        if doc_store and document:
+
+            source = document.get(
+                "filename",
+                f"doc_{int(time.time())}.txt"
+            )
+
+            content = document.get("content", "")
+
+            f_hash = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+
+            # duplicate check
+            if not is_duplicate_document(source, f_hash):
+                file_b64 = state.get("file_b64")
+                filename = state.get("filename")
+                if file_b64 and filename:
+                    os.makedirs(DOCS_DIR, exist_ok=True)
+                    safe_name = os.path.basename(filename)
+                    raw_path = os.path.join(DOCS_DIR, safe_name)
+
+                    with open(raw_path, "wb") as f:
+                        f.write(base64.b64decode(file_b64))
+
+
+                # ingest into vector DB
+                ingest_single_document(
+                    document,
+                    source,
+                    f_hash
+                )
+
+                doc_answer += (
+                    f"\n\nDocument stored successfully "
+                    f"at RAG database and indexed."
+                )
+
+            else:
+                doc_answer += (
+                    "\n\nDocument already exists in RAG database."
+                )
+
+        return {
+            "doc": doc_answer
+        }
 
     def web_agent_node(state: GraphState) -> GraphState:
         """Run Web Search agent when route requires it, store result under 'web'."""
@@ -699,6 +840,7 @@ try:
         rag = state.get("rag")
         web = state.get("web")
         vision = state.get("vision")
+        doc = state.get("doc")
 
         # FINAL AGGREGATION PROMPT, if rag/web no results, their portion will be none/empty, LLM should learn to handle that gracefully
         prompt = f"""
@@ -710,6 +852,7 @@ try:
         - Do NOT use bullet lists unless necessary
         - If both RAG and Web info are present, compare them first for any conflicting information and synthesize them into a single answer.
         - If Vision info is present, include it in the final answer.
+        - If document info is present, include it in the final answer.
         - Remove any special characters or formatting from the sources.
 
         User Query:
@@ -731,6 +874,9 @@ try:
         {vision.get('scene') if vision else "None"}
         {vision.get('text_in_image') if vision else "None"}
         {vision.get('user_question_answer') if vision else "None"}
+
+        Document Answer:
+        {doc if doc else "None"}
 
         Final concise answer:
         """
@@ -756,15 +902,18 @@ try:
     graph.add_node("vision_agent", vision_agent_node)
     graph.add_node('rag_agent', rag_agent_node)
     graph.add_node('web_agent', web_agent_node)
+    graph.add_node('document_agent', document_agent_node)
     graph.add_node('aggregator', aggregator_node)
 
     graph.add_edge(START, 'manager')
     graph.add_edge("manager", "vision_agent")
     graph.add_edge('manager', 'rag_agent')
     graph.add_edge('manager', 'web_agent')
+    graph.add_edge('manager', 'document_agent')
     graph.add_edge("vision_agent", "aggregator")
     graph.add_edge('rag_agent', 'aggregator')
     graph.add_edge('web_agent', 'aggregator')
+    graph.add_edge('document_agent', 'aggregator')
 
     compiled_graph = graph.compile()
 except Exception as e:
@@ -805,9 +954,12 @@ def chat(req: ChatRequest):
                 "message": req.query or req.message or "",
                 "image_b64": req.image_b64,
                 "history": req.history or [],
-                "document": document
-            }
+                "document": document,
 
+                "file_b64": req.file_b64,
+                "filename": req.filename
+            }
+            # pass down the original message, conversation history, and any attached document to the graph. The manager node will decide how to route it.
             out = compiled_graph.invoke(state)
 
             return out.get("response", {

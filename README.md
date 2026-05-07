@@ -119,5 +119,5 @@ Uses FastApi to communicate between backend and frontend
 
 ### Future updates
 - Graph RAG option for user
-- Allow flexbility to ingest the doc if user requests, after uploading a document for chat reasoning.
+- Added storing of document into RAG database if user requests at point of uploading via user query. To include session memory to allow later stage doc ingestion
 ---
