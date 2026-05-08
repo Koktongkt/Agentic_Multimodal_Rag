@@ -20,16 +20,21 @@ Responsible for:
   - Real-time / external knowledge / complex queries → Web Search
   - Complex → Both
   - Vision when Image is attached
-  - Direct answer if simple query or attached document
+  - Direct answer if simple query
+  - If document, 
 
 - Manage user actions:
-  - Document / Image upload
-  - User's query
+  - receiving Document / Image upload
+  - deciphering User's query and determine the route to downstream agent
+
+- Prompt tuning:
+  - Rules are defined for how each route are determined, with an output of either True or False. Tune further based on your requirement.
+  - If the user query is very simple / conversational, the manager agent will otuput direct: true and provide a direct answer under direct_answer output.
+  - Tune further and include more routes if scaling with more agents (remember to add in the GraphState dict as well for more required inputs). Note: For more complicated use case/business logic, the current method may not be efficient or even feasible.
 
 ---
 
 ### 2. RAG Agent (Vector Retrieval)
-
 Handles:
 - Semantic retrieval via query embedding
 
@@ -46,19 +51,22 @@ Handles:
 ---
 
 ### 3. Web Search Agent
-
 Handles:
 - External knowledge retrieval
 - Query decomposition
 - Summarization
 
 ### 4. Vision Agent
-
 Handles:
 - image upload queries
 
-### 5. Aggregrator Agent
+### 5. Document Agent
+Handles:
+- Document upload queries
+- If no queries provided, it will summarize the document as default
+- If user's query contain intents to store the document in RAG database, it will perform duplication of doc in RAG database by file hash check. It the doc file hash does not exist, it will then store the doc in the storage folder and perform chunking + embedding.
 
+### 5. Aggregrator Agent
 Handles:
 - Final responses from all agents
 - Compares their responses and check for consistences and accuracies
@@ -75,7 +83,6 @@ Handles:
 ---
 
 ## 🔀 Routing Logic
-
 The Manager Agent determines which agents to invoke:
 
 | Query Type | Action |
@@ -83,6 +90,7 @@ The Manager Agent determines which agents to invoke:
 | Local knowledge | RAG only |
 | Real-time info | Web Search only |
 | Image Understanding | Vision only |
+| Document Understanding | Document only |
 | Complex / uncertain | More than one agent |
 | Simple query, documents attachment | Direct|
 
@@ -101,8 +109,7 @@ Fallback:
  - /CLEAR and FORCE=TRUE via Force Clear and rebuilt button to rebuilt database entirely
 
 ## Communication protocol
- 
-Uses FastApi to communicate between backend and frontend
+ Uses FastApi to communicate between backend and frontend
 /chat to send query
 /ingest to ingest new docs in database
 /ingest and Force=True to rebult database entirely
@@ -116,8 +123,11 @@ Uses FastApi to communicate between backend and frontend
   - Hash_file helper function takes the path file as input, opens the file and hashes the content
 - For new documents / updated parts of same documents, the hash key will be used to check whether the same chunks of the doc in chroma db needs to be replaced anot
 
+## Memory
+- currently conversation are stored in-memory as history for the last 3 conversation [-3]. You can extend this, but it eats away the context window.
+- SessionStorage is initalized from frontend to backend for session_id via uuid generation. This is for protoype/local development only. For production grade, switch to localStorage to possibly cloud DB storage for actual user sessions storage.
+- SessionStorage stores mainly uploaded document and its content in the event a user chooses to requests to store this in RAG database.
 
 ### Future updates
-- Graph RAG option for user
-- Added storing of document into RAG database if user requests at point of uploading via user query. To include session memory to allow later stage doc ingestion
+- Graph RAG option for user for more complicated / extensive knowledge
 ---

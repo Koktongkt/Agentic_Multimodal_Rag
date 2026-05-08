@@ -48,6 +48,7 @@ app.include_router(vision_router, prefix="/api")
 # Web search availability
 from ddgs import DDGS
 
+SESSION_DOC_CACHE = {}  # in-memory cache for documents uploaded during chat sessions, keyed by session_id
 
 class ChatRequest(BaseModel):
     message: str | None = None
@@ -57,6 +58,8 @@ class ChatRequest(BaseModel):
     file_mime: str | None = None
     query: str | None = None
     history: list[dict] | None = None
+
+    session_id: Optional[str] = None
 
 
 def ollama_embed(texts):
@@ -561,9 +564,6 @@ try:
             [f"{h['role']}: {h['content']}" for h in history[-10:]]
         )
 
-        doc_text = ""
-        if document and document.get("content"):
-            doc_text = document["content"][:4000]
 
         prompt = f"""
         You are a routing and reasoning system.
@@ -576,10 +576,7 @@ try:
 
         Image present: {"yes" if image else "no"}
 
-        Document present: {"yes" if doc_text else "no"}
-
-        Document content (if any):
-        {doc_text}
+        Document present: {"yes" if document else "no"}
 
         ---
 
@@ -602,8 +599,8 @@ try:
         vision: true if image is present or question refers to image
         rag: true if question requires knowledge on the topic of covid19 as the documents are about covid19
         web: true if question requires external or recent information
-        doc: true if document is present. If user requests for storage of the document, true.
-        direct: true if simple general knowledge question. If an image or document is present, false.
+        doc: true if document is present and User is asking about the document. If query is not asking about the document or not relevant to it, false. If document exists and User message is empty, true. If user requests for storage of the document, true.
+        direct: true if simple general knowledge question or basic conversation. If an image is present, false.
         direct_answer: If direct is true, provide a concise answer here. Only provide an answer if you are very confident and can be concise.
         """
 
@@ -646,7 +643,6 @@ try:
         rag_response = rag_agent(message, history=history)
         return {"rag": rag_response}
     
-
     def document_agent_node(state: GraphState) -> GraphState:
         """Process attached document if route requires it."""
 
@@ -657,7 +653,12 @@ try:
 
         document = state.get("document")
         message = state.get("message", "")
-        history_text = state.get("history", [])
+        history = state.get("history", [])
+        history_text = ""
+        if history:
+            history_text = "\n".join(
+                [f"{h['role']}: {h['content']}" for h in history[-3:]]
+            )
 
         if not document or not document.get("content"):
             return {}
@@ -676,8 +677,10 @@ try:
         Conversation history:
         {history_text}
 
-        If user requests to store/save/remember/index the document
-        for future retrieval, set "store": true.
+        If user clearly requests to store/save/remember/index the document
+        for future retrieval, set "store": true. Else, if user just wants to ask questions about the document but does not explicitly request to store it, set "store": false.
+        If there is no clear request to store the document, default to "store": false to avoid unnecessary storage of irrelevant documents.
+        If there is no query, summarize the document concisely and set "store" to false.
 
         Return ONLY valid JSON:
 
@@ -779,20 +782,23 @@ try:
             return {"vision": {"error": "No image provided"}}
 
         prompt = message if message else "Describe this image in detail."
-        system_prompt = """
+        system_prompt = f"""
         You are a vision AI.
 
         Use the conversation history for additional context if required and if user's request is ambiguous, but do not rely on it too much as it may be incomplete. Focus on analyzing the image.
 
+        Conversation history:
+        {history_text}
+
         Return ONLY JSON:
-        {
+        {{
         "summary": "",
         "objects": [],
         "scene": "",
         "text_in_image": "",
         "user_question_answer": "",
         "safety_notes": ""
-        }
+        }}
         """
         final_prompt = f"""
         {system_prompt}
@@ -924,10 +930,15 @@ except Exception as e:
 @app.post('/chat')
 def chat(req: ChatRequest):
 
+    session_id = req.session_id # receives session_id from frontend
+    print("Session ID:", session_id)
     # Handle optional file upload (base64) and convert to markdown using DocumentIngestor/MarkItDown
     document = None
-    tmp_path = None
+    
     if req.file_b64 and req.filename:
+
+        tmp_path = None
+
         try:
             # write to temp file
             tmpdir = tempfile.gettempdir()
@@ -938,6 +949,14 @@ def chat(req: ChatRequest):
 
             ingestor = DocumentIngestor()
             document = ingestor.load_file(tmp_path)
+
+            # Cache document for potential ingestion if user wants to store it in RAG later
+            SESSION_DOC_CACHE[session_id] = {
+                "document": document,
+                "file_b64": req.file_b64,
+                "filename": req.filename,
+            }
+
         except Exception as e:
             print(f"Failed converting uploaded document: {e}")
             document = None
@@ -947,6 +966,15 @@ def chat(req: ChatRequest):
                     os.remove(tmp_path)
             except Exception:
                 pass
+    
+    else:
+        # if no file uploaded in this request, check if there's a cached document from previous upload in the session
+        cached = SESSION_DOC_CACHE.get(session_id)
+        if cached:
+            document = cached.get("document")
+
+            req.file_b64 = cached.get("file_b64")
+            req.filename = cached.get("filename")
 
     if compiled_graph is not None:
         try:

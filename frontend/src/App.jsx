@@ -16,6 +16,18 @@ export default function App(){
   const [history, setHistory] = useState([])
   const [showIngestModal, setShowIngestModal] = useState(false)
 
+  const [sessionId] = useState(() => {
+    let sid = sessionStorage.getItem('session_id')
+
+    if (!sid) {
+      sid = crypto.randomUUID()
+      sessionStorage.setItem('session_id', sid)
+    }
+
+    return sid
+  })
+
+  
   const toBase64 = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -59,8 +71,11 @@ export default function App(){
         image_b64: base64,
         file_b64: docBase64,
         filename: chatDoc ? chatDoc.name : undefined,
-        history: newHistory
+        history: newHistory,
+        session_id: sessionId
       }
+
+      
 
       const res = await fetch('http://localhost:8000/chat', {
         method: 'POST',
